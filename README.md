@@ -58,6 +58,6 @@ code_conversion_ip/
 ## Key Points
 
 - **Prompt = Configuration** - No complex setup, just write what you want converted
-- **Chunking = Scalability** - Deterministic splitting enables any script size and avoids LLM token size     limitations
-- **LLM-as-Judge = Quality** - Self-validating output without manual review
+- **Chunking = Scalability** - Deterministic splitting enables any script size and avoids LLM token size limitations
+- **LLM-as-Judge = Quality** - Self-validating output without manual review. Use a **different model** for validation than conversion to avoid bias (e.g., convert with Claude → validate with GPT-4)
 - **Delta Tables = Lineage** - Full audit trail of source, converted, and validation
