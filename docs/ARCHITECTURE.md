@@ -307,6 +307,8 @@ merged_df = df_ordered.groupBy("script_name").agg(
 
 ## Supported Source Types
 
+The following are examples - this approach works for **any text-based code that can be described in a prompt**:
+
 | Source | Target |
 |--------|--------|
 | Teradata BTEQ | PySpark/Spark SQL |
@@ -317,6 +319,179 @@ merged_df = df_ordered.groupBy("script_name").agg(
 | Snowflake SQL | PySpark |
 | Hive/Impala | PySpark |
 | AWS Glue (Python) | Databricks Notebooks |
+| SAS | PySpark |
+| Ab Initio | PySpark |
+| DataStage | PySpark |
+| Talend | PySpark |
+| *Any SQL dialect* | *Spark SQL* |
+| *Any ETL tool exports* | *PySpark* |
+
+> **Note**: The LLM doesn't have hard-coded rules - it understands code from context. If you can describe the conversion in your prompt, it can convert it.
+
+---
+
+## Error Handling
+
+### When Conversion Fails
+
+```sql
+-- Identify failed conversions (null or error responses)
+SELECT 
+    script_name,
+    chunk_id,
+    CASE 
+        WHEN converted_code IS NULL THEN 'NULL_RESPONSE'
+        WHEN converted_code LIKE '%error%' THEN 'ERROR_IN_OUTPUT'
+        WHEN LENGTH(converted_code) < 100 THEN 'SUSPICIOUSLY_SHORT'
+        ELSE 'OK'
+    END AS status
+FROM converted_scripts
+WHERE converted_code IS NULL 
+   OR converted_code LIKE '%error%'
+   OR LENGTH(converted_code) < 100;
+```
+
+### Retry Pattern
+
+```sql
+-- Retry failed chunks with different model or adjusted prompt
+CREATE OR REPLACE TABLE retry_conversions AS
+SELECT 
+    script_name,
+    chunk_id,
+    source_code,
+    ai_query(
+        'databricks-meta-llama-3-1-70b-instruct',  -- Try different model
+        '{CONVERSION_PROMPT}' || source_code,
+        modelParameters => named_struct('max_tokens', 65000, 'temperature', 0.1)  -- Slight temperature increase
+    ) AS converted_code
+FROM converted_scripts
+WHERE converted_code IS NULL 
+   OR LENGTH(converted_code) < 100;
+```
+
+### Manual Review Flag
+
+```sql
+-- Flag chunks that need human review
+ALTER TABLE converted_scripts ADD COLUMN needs_review BOOLEAN;
+
+UPDATE converted_scripts
+SET needs_review = TRUE
+WHERE script_name IN (
+    SELECT script_name FROM validation_results 
+    WHERE validation_result LIKE 'failure%'
+);
+```
+
+---
+
+## Cost Estimation
+
+### Token Estimation
+
+```python
+# Rough estimation: 1 token ≈ 4 characters (for English/code)
+def estimate_tokens(text):
+    return len(text) / 4
+
+# Calculate for your scripts
+df = spark.table("input_scripts")
+df_with_tokens = df.withColumn(
+    "estimated_tokens",
+    (F.length("source_code") / 4).cast("int")
+)
+
+# Total tokens for conversion
+total_input_tokens = df_with_tokens.agg(F.sum("estimated_tokens")).collect()[0][0]
+
+# Output is typically 1-1.5x input for code conversion
+estimated_output_tokens = total_input_tokens * 1.25
+
+print(f"Estimated input tokens: {total_input_tokens:,}")
+print(f"Estimated output tokens: {estimated_output_tokens:,}")
+print(f"Total tokens (input + output): {total_input_tokens + estimated_output_tokens:,}")
+```
+
+### Cost Factors
+
+| Factor | Impact |
+|--------|--------|
+| Model choice | Claude/GPT-4 cost more than Llama |
+| Script size | Larger scripts = more tokens |
+| Chunk overlap | Some context may be repeated |
+| Retries | Failed conversions cost extra |
+| Validation | LLM-as-Judge doubles token usage |
+
+### Cost Control Tips
+
+- Start with smaller/cheaper models for initial testing
+- Use chunking to avoid wasted tokens on failed large requests
+- Skip validation for simple scripts
+- Cache results - don't re-convert unchanged scripts
+
+---
+
+## Metrics & Monitoring
+
+### Conversion Dashboard Queries
+
+```sql
+-- Overall conversion status
+SELECT 
+    source_type,
+    COUNT(*) AS total_scripts,
+    SUM(CASE WHEN converted_code IS NOT NULL THEN 1 ELSE 0 END) AS converted,
+    SUM(CASE WHEN converted_code IS NULL THEN 1 ELSE 0 END) AS failed,
+    ROUND(100.0 * SUM(CASE WHEN converted_code IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 2) AS success_rate
+FROM converted_scripts
+GROUP BY source_type;
+
+-- Validation pass rate
+SELECT 
+    script_name,
+    COUNT(*) AS total_chunks,
+    SUM(CASE WHEN validation_result LIKE 'success%' THEN 1 ELSE 0 END) AS passed,
+    SUM(CASE WHEN validation_result LIKE 'failure%' THEN 1 ELSE 0 END) AS failed,
+    ROUND(100.0 * SUM(CASE WHEN validation_result LIKE 'success%' THEN 1 ELSE 0 END) / COUNT(*), 2) AS pass_rate
+FROM validation_results
+GROUP BY script_name
+ORDER BY pass_rate ASC;
+
+-- Scripts needing attention (failed validation)
+SELECT 
+    v.script_name,
+    v.chunk_id,
+    v.validation_result,
+    SUBSTRING(c.source_code, 1, 200) AS source_preview
+FROM validation_results v
+JOIN converted_scripts c ON v.script_name = c.script_name AND v.chunk_id = c.chunk_id
+WHERE v.validation_result LIKE 'failure%'
+ORDER BY v.script_name, v.chunk_id;
+
+-- Conversion timeline
+SELECT 
+    DATE(converted_at) AS conversion_date,
+    COUNT(*) AS scripts_converted,
+    SUM(LENGTH(source_code)) AS total_chars_processed
+FROM converted_scripts
+GROUP BY DATE(converted_at)
+ORDER BY conversion_date;
+```
+
+### Token Usage Tracking
+
+```sql
+-- Track token usage per script (approximate)
+SELECT 
+    script_name,
+    SUM(LENGTH(source_code) / 4) AS input_tokens,
+    SUM(LENGTH(converted_code) / 4) AS output_tokens,
+    SUM(LENGTH(source_code) / 4) + SUM(LENGTH(converted_code) / 4) AS total_tokens
+FROM converted_scripts
+GROUP BY script_name
+ORDER BY total_tokens DESC;
+```
 
 ---
 
