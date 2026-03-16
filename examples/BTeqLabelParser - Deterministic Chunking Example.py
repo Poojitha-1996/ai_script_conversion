@@ -816,7 +816,7 @@ def main():
     )
     
     parser.add_argument('input_file', nargs='?',
-                       default=r"C:\Users\skondapally\Databricks POC\MSS Script\MSS Script 4\DSC_NTL_ADDRESS_REF_DATA_DET.sql",
+                       default=r"{file_path}",
                        help='Path to input BTEQ script')
     parser.add_argument('--threshold', type=int, default=1200,
                        help='Maximum lines per chunk (default: 1200)')
