@@ -2,6 +2,8 @@
 
 Validate functional parity between source and converted code using a second LLM call.
 
+> **Best Practice**: Use a **different model** for validation than you used for conversion. This avoids self-bias - the same model may miss its own systematic errors or be lenient toward its own output. Example: Convert with `databricks-claude-sonnet-4-5` → Validate with `databricks-meta-llama-3-1-70b-instruct` (or any other model family).
+
 ---
 
 ## Concept
