@@ -189,3 +189,115 @@ SELECT
 FROM {catalog}.{schema}.validation_summary
 WHERE NOT overall_pass
 ORDER BY functional_parity;
+
+
+-- ============================================================================
+-- ERROR HANDLING & RETRY
+-- ============================================================================
+
+-- Identify failed conversions
+SELECT 
+    script_name,
+    chunk_id,
+    CASE 
+        WHEN converted_code IS NULL THEN 'NULL_RESPONSE'
+        WHEN converted_code LIKE '%error%' THEN 'ERROR_IN_OUTPUT'
+        WHEN LENGTH(converted_code) < 100 THEN 'SUSPICIOUSLY_SHORT'
+        ELSE 'OK'
+    END AS status,
+    LENGTH(source_code) AS source_length,
+    LENGTH(converted_code) AS output_length
+FROM {catalog}.{schema}.converted_chunks
+WHERE converted_code IS NULL 
+   OR converted_code LIKE '%error%'
+   OR LENGTH(converted_code) < 100;
+
+-- Retry failed chunks with different model
+CREATE OR REPLACE TABLE {catalog}.{schema}.retry_conversions AS
+SELECT 
+    script_name,
+    chunk_id,
+    source_code,
+    ai_query(
+        '{alternate_model}',  -- Use different model for retry
+        '{prompt}' || source_code,
+        modelParameters => named_struct('max_tokens', 65000, 'temperature', 0.1)
+    ) AS converted_code,
+    '{alternate_model}' AS conversion_model,
+    CURRENT_TIMESTAMP() AS converted_at
+FROM {catalog}.{schema}.converted_chunks
+WHERE converted_code IS NULL 
+   OR LENGTH(converted_code) < 100;
+
+-- Flag scripts needing manual review
+ALTER TABLE {catalog}.{schema}.converted_chunks ADD COLUMN IF NOT EXISTS needs_review BOOLEAN DEFAULT FALSE;
+
+UPDATE {catalog}.{schema}.converted_chunks
+SET needs_review = TRUE
+WHERE script_name IN (
+    SELECT DISTINCT script_name 
+    FROM {catalog}.{schema}.validation_results 
+    WHERE validation_result LIKE 'failure%'
+);
+
+
+-- ============================================================================
+-- TOKEN USAGE & COST TRACKING
+-- ============================================================================
+
+-- Estimate token usage per script (1 token ≈ 4 characters)
+SELECT 
+    script_name,
+    SUM(CAST(LENGTH(source_code) / 4 AS INT)) AS input_tokens,
+    SUM(CAST(LENGTH(converted_code) / 4 AS INT)) AS output_tokens,
+    SUM(CAST((LENGTH(source_code) + LENGTH(converted_code)) / 4 AS INT)) AS total_tokens
+FROM {catalog}.{schema}.converted_chunks
+WHERE converted_code IS NOT NULL
+GROUP BY script_name
+ORDER BY total_tokens DESC;
+
+-- Daily conversion volume
+SELECT 
+    DATE(converted_at) AS conversion_date,
+    COUNT(DISTINCT script_name) AS scripts_processed,
+    COUNT(*) AS chunks_processed,
+    SUM(CAST(LENGTH(source_code) / 4 AS INT)) AS total_input_tokens,
+    SUM(CAST(LENGTH(converted_code) / 4 AS INT)) AS total_output_tokens
+FROM {catalog}.{schema}.converted_chunks
+WHERE converted_code IS NOT NULL
+GROUP BY DATE(converted_at)
+ORDER BY conversion_date DESC;
+
+
+-- ============================================================================
+-- DASHBOARD SUMMARY VIEW
+-- ============================================================================
+
+CREATE OR REPLACE VIEW {catalog}.{schema}.conversion_dashboard AS
+SELECT 
+    'Total Scripts' AS metric,
+    CAST(COUNT(DISTINCT script_name) AS STRING) AS value
+FROM {catalog}.{schema}.input_scripts
+UNION ALL
+SELECT 
+    'Converted Successfully',
+    CAST(COUNT(DISTINCT script_name) AS STRING)
+FROM {catalog}.{schema}.converted_chunks
+WHERE converted_code IS NOT NULL AND LENGTH(converted_code) > 100
+UNION ALL
+SELECT 
+    'Validation Pass Rate',
+    CONCAT(CAST(ROUND(100.0 * SUM(CASE WHEN validation_result LIKE 'success%' THEN 1 ELSE 0 END) / COUNT(*), 1) AS STRING), '%')
+FROM {catalog}.{schema}.validation_results
+UNION ALL
+SELECT 
+    'Needs Review',
+    CAST(COUNT(*) AS STRING)
+FROM {catalog}.{schema}.converted_chunks
+WHERE needs_review = TRUE
+UNION ALL
+SELECT 
+    'Total Tokens Used',
+    FORMAT_NUMBER(SUM(CAST((LENGTH(source_code) + LENGTH(converted_code)) / 4 AS BIGINT)), 0)
+FROM {catalog}.{schema}.converted_chunks
+WHERE converted_code IS NOT NULL;
