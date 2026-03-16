@@ -216,6 +216,8 @@ See `prompts/` folder for source-specific prompt templates.
 
 Validate converted code using a second LLM call.
 
+> **Important**: Use a **different model** for validation than you used for conversion. This avoids self-bias - the same model may miss its own systematic errors or be lenient toward its own output patterns. For example: Convert with Claude → Validate with GPT-4 (or vice versa).
+
 ```sql
 CREATE OR REPLACE TABLE {catalog}.{schema}.validation_results AS
 SELECT 
